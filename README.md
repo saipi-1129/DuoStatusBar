@@ -2,6 +2,14 @@
 
 macOSのメニューバーに、バッテリー残量とゲージ、ネットワーク、音量、CPUまたはメモリ情報をコンパクトに表示するSwiftUI/AppKitアプリです。ネットワークやバッテリーの状態はMac上で読み取ります。
 
+## スクリーンショット
+
+数値・ネットワーク情報は説明用の固定データです。
+
+![DuoStatusBarのパネル](docs/images/duostatusbar-panel.png)
+
+![メニューバーの表示例](docs/images/duostatusbar-menubar.png)
+
 ## インストール
 
 1. [Releases](../../releases)から、お使いのMac向けの`DuoStatusBar-<version>-<architecture>.dmg`をダウンロードします。

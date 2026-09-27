@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 
 @MainActor
-func renderDuoPreview(to path: String, snapshot: StatusSnapshot = StatusSnapshot(batteryPercent: 88, isCharging: false, connection: .wifi(name: "Wi-Fi", level: 4), volumePercent: 60), showingOutputs: Bool = false) throws {
+func renderDuoPreview(to path: String, snapshot: StatusSnapshot = StatusSnapshot(batteryPercent: 88, isCharging: true, externalPowerConnected: true, connection: .wifi(name: "Wi-Fi", level: 4), volumePercent: 60, localIPAddress: "192.0.2.42", cpuPercent: 34, memoryPercent: 68, memoryBytes: 8_200_000_000, chargingWatts: 24.5), showingOutputs: Bool = false, previewMode: Bool = false) throws {
     let model = DashboardModel(snapshot, .overview)
     model.showingOutputs = showingOutputs
-    let renderer = ImageRenderer(content: DuoPanel(model: model))
+    let renderer = ImageRenderer(content: DuoPanel(model: model, previewMode: previewMode))
     renderer.scale = 2
     guard let image = renderer.nsImage,
           let tiff = image.tiffRepresentation,
@@ -150,15 +150,20 @@ final class DuoDashboardViewController: NSHostingController<DuoPanel> {
 }
 struct DuoPanel: View {
     @ObservedObject var model: DashboardModel
+    let previewMode: Bool
+    init(model: DashboardModel, previewMode: Bool = false) {
+        self.model = model
+        self.previewMode = previewMode
+    }
     @AppStorage("panelAppearance") private var appearance = PanelAppearance.classic.rawValue
-    private var glass: Bool { PanelAppearance.supportsGlass && appearance == PanelAppearance.liquidGlass.rawValue }
+    private var glass: Bool { !previewMode && PanelAppearance.supportsGlass && appearance == PanelAppearance.liquidGlass.rawValue }
     private var ink: Color { glass ? .primary : palette.ink }
     private func foreground(_ classic: Color) -> Color { glass ? .primary : classic }
     @AppStorage("panelTheme") private var themeName = PanelTheme.lavender.rawValue
     @AppStorage("statusMetric") private var metricName = StatusMetric.cpu.rawValue
     @AppStorage("showBatteryNumber") private var showBatteryNumber = true
-    private var metric: StatusMetric { StatusMetric(rawValue: metricName) ?? .cpu }
-    private var palette: PanelTheme { PanelTheme(rawValue: themeName) ?? .lavender }
+    private var metric: StatusMetric { previewMode ? .cpu : StatusMetric(rawValue: metricName) ?? .cpu }
+    private var palette: PanelTheme { previewMode ? .lavender : PanelTheme(rawValue: themeName) ?? .lavender }
     @State private var editing = false
     @State private var draft = 0.0
     private var s: StatusSnapshot { model.snapshot }
@@ -219,12 +224,22 @@ struct DuoPanel: View {
                 .panelSurface(palette.tile, in: RoundedRectangle(cornerRadius: 30))
                 .help(metric == .memory ? "物理メモリに対する使用量（ファイルキャッシュを除く概算）" : "メニューバーに表示する項目を選択")
                     VStack(spacing: 7) {
-                        Toggle("残量数値", isOn: $showBatteryNumber)
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                            .font(.system(size: 11, weight: .semibold))
-                            .fixedSize()
-                            .help("メニューバーの残量数値を表示。オフでは通信アイコンを拡大")
+                        if previewMode {
+                            HStack(spacing: 6) {
+                                Text("残量数値")
+                                Capsule().fill(palette.primary).frame(width: 32, height: 18)
+                                    .overlay(alignment: .trailing) {
+                                        Circle().fill(Color.white).frame(width: 14, height: 14).padding(2)
+                                    }
+                            }.font(.system(size: 11, weight: .semibold)).fixedSize()
+                        } else {
+                            Toggle("残量数値", isOn: $showBatteryNumber)
+                                .toggleStyle(.switch)
+                                .controlSize(.mini)
+                                .font(.system(size: 11, weight: .semibold))
+                                .fixedSize()
+                                .help("メニューバーの残量数値を表示。オフでは通信アイコンを拡大")
+                        }
                         ZStack {
                             ForEach(0..<24) { i in
                                 Capsule().fill(batteryGaugeColor.opacity(Double(i) < Double(s.batteryPercent ?? 0) / 100 * 24 ? 0.98 : 0.18))
@@ -344,7 +359,7 @@ struct DuoPanel: View {
             Button { model.showOutputMenu() } label: {
                 HStack {
                     Image(systemName: "hifispeaker.fill")
-                    Text(model.outputs.first(where: { $0.id == model.outputID })?.name ?? "出力先を選択")
+                    Text(previewMode ? "内蔵スピーカー" : model.outputs.first(where: { $0.id == model.outputID })?.name ?? "出力先を選択")
                         .lineLimit(1)
                     Spacer()
                     Image(systemName: "chevron.up.chevron.down")

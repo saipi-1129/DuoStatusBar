@@ -856,7 +856,7 @@ if CommandLine.arguments.count == 3, ["--render-live", "--render-outputs"].conta
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-bar" {
     let bar = StatusBarView(frame: NSRect(origin: .zero, size: StatusBarView.preferredSize))
     bar.appearance = NSAppearance(named: .darkAqua)
-    bar.update(with: StatusSnapshot(batteryPercent: 90, isCharging: false, connection: .ethernet, volumePercent: 40, cpuPercent: 23, memoryPercent: 68))
+    bar.update(with: StatusSnapshot(batteryPercent: 90, isCharging: true, externalPowerConnected: true, connection: .ethernet, volumePercent: 40, cpuPercent: 23, memoryPercent: 68))
     let image = NSImage(size: NSSize(width: 352, height: 112))
     image.lockFocus()
     NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.18, alpha: 1).setFill()
@@ -871,7 +871,7 @@ if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-bar" 
     exit(0)
 }
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-preview" {
-    try MainActor.assumeIsolated { try renderDuoPreview(to: CommandLine.arguments[2]) }
+    try MainActor.assumeIsolated { try renderDuoPreview(to: CommandLine.arguments[2], previewMode: true) }
     exit(0)
 }
 let delegate = AppDelegate()
