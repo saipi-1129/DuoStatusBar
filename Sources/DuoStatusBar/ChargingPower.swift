@@ -4,15 +4,20 @@ import IOKit
 /// Battery-side estimate, not adapter rating or wall power. Registry keys may
 /// be unavailable on some Macs; never substitute adapter capacity for a reading.
 final class ChargingPower {
+    static func externalPowerConnected() -> Bool? {
+        readFlag("ExternalConnected")
+    }
+
     static func isCharging() -> Bool? {
+        if externalPowerConnected() == false { return false }
+        return readFlag("IsCharging")
+    }
+
+    private static func readFlag(_ key: String) -> Bool? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
-        func flag(_ key: String) -> Bool? {
-            (IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber)?.boolValue
-        }
-        if flag("ExternalConnected") == false { return false }
-        return flag("IsCharging")
+        return (IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber)?.boolValue
     }
 
     private var lastRead: TimeInterval = -.infinity

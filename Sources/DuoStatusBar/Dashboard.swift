@@ -238,6 +238,9 @@ struct DuoPanel: View {
                                 Text(s.chargingWatts.map { String(format: "約%.1fW", $0) } ?? "充電中")
                                     .font(.system(size: 10, weight: .medium)).monospacedDigit()
                                     .help("バッテリー充電電力の概算。15秒ごとに更新。充電器の定格やコンセント消費電力とは異なります")
+                            } else if s.externalPowerConnected {
+                                Text("電源接続")
+                                    .font(.system(size: 10, weight: .medium))
                             }
                             }
                         }.frame(width: 84, height: 84)
@@ -471,6 +474,6 @@ struct DuoPanel: View {
         }
     }
     private var batteryGaugeColor: Color {
-        s.lowPowerMode ? .yellow : s.isCharging ? .green : foreground(.white)
+        s.lowPowerMode ? .yellow : s.externalPowerConnected ? .green : foreground(.white)
     }
 }

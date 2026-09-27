@@ -44,6 +44,7 @@ struct StatusSnapshot: Equatable {
 
     var batteryPercent: Int?
     var isCharging: Bool
+    var externalPowerConnected: Bool = false
     let connection: Connection
     let volumePercent: Int?
     var localIPAddress: String? = nil
@@ -88,6 +89,7 @@ final class SystemMonitor {
         return StatusSnapshot(
             batteryPercent: battery.percent,
             isCharging: battery.isCharging,
+            externalPowerConnected: ChargingPower.externalPowerConnected() ?? battery.isCharging,
             connection: connection,
             volumePercent: volume,
             localIPAddress: localIPAddress,
@@ -105,6 +107,7 @@ final class SystemMonitor {
         var next = previous
         next.batteryPercent = battery.percent
         next.isCharging = battery.isCharging
+        next.externalPowerConnected = ChargingPower.externalPowerConnected() ?? battery.isCharging
         next.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
         next.chargingWatts = chargingPower.sample(isCharging: battery.isCharging)
         return next
@@ -320,7 +323,7 @@ final class StatusBarView: NSView {
         // Template images receive the native menu-bar tint. Accented states
         // must remain multicolor, so those states are rendered with a matching
         // explicit inactive alpha instead.
-        image.isTemplate = !snapshot.lowPowerMode && !snapshot.isCharging && (metric != .memory || snapshot.memoryPressure == .normal)
+        image.isTemplate = !snapshot.lowPowerMode && !snapshot.externalPowerConnected && (metric != .memory || snapshot.memoryPressure == .normal)
         return image
     }
     override func mouseDown(with event: NSEvent) {
@@ -360,7 +363,7 @@ final class StatusBarView: NSView {
         // BatteryOutline creates rounded gaps directly in its stroke.
         let gaugeColor: NSColor = snapshot.lowPowerMode
             ? .systemYellow.withAlphaComponent(color.alphaComponent)
-            : snapshot.isCharging ? .systemGreen.withAlphaComponent(color.alphaComponent) : color
+            : snapshot.externalPowerConnected ? .systemGreen.withAlphaComponent(color.alphaComponent) : color
         BatteryOutline.draw(snapshot.batteryPercent, color: gaugeColor, showsNumber: showsBatteryNumber)
         NSGraphicsContext.current?.restoreGraphicsState()
         func text(_ value: String, _ rect: NSRect, _ size: CGFloat, _ textColor: NSColor) {
@@ -781,7 +784,7 @@ if CommandLine.arguments.contains("--test-charging") {
     let first = reader.sample(isCharging: true, now: 100)
     precondition(reader.sample(isCharging: true, now: 101) == first)
     precondition(reader.sample(isCharging: false, now: 102) == nil)
-    print("PASS charging watts conversion, invalid values, cache, disconnect; live=\(first.map { String(format: "%.1fW", $0) } ?? "unavailable")")
+    print("PASS charging watts conversion, invalid values, cache, disconnect; externalPower=\(ChargingPower.externalPowerConnected().map(String.init(describing:)) ?? "unavailable"), live=\(first.map { String(format: "%.1fW", $0) } ?? "unavailable")")
     exit(0)
 }
 if CommandLine.arguments.contains("--test-memory") {
