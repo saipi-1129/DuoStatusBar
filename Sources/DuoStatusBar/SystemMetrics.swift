@@ -15,23 +15,35 @@ enum MemoryPressureLevel: Equatable {
 }
 
 enum StatusMetric: String, CaseIterable, Identifiable {
-    case cpu, memory, volume
+    case cpu, memory, volume, aiUsage
     var id: String { rawValue }
     var title: String {
-        switch self { case .cpu: return "CPU"; case .memory: return "メモリ"; case .volume: return "音量" }
+        switch self {
+        case .cpu: return "CPU"
+        case .memory: return "メモリ"
+        case .volume: return "音量"
+        case .aiUsage: return "AI"
+        }
     }
     var shortTitle: String {
-        switch self { case .cpu: return "CPU"; case .memory: return "MEM"; case .volume: return "VOL" }
+        switch self {
+        case .cpu: return "CPU"
+        case .memory: return "MEM"
+        case .volume: return "VOL"
+        case .aiUsage: return "AI"
+        }
     }
     func value(_ snapshot: StatusSnapshot) -> Int? {
         switch self {
         case .cpu: return snapshot.cpuPercent
         case .memory: return snapshot.memoryPercent
         case .volume: return snapshot.volumePercent
+        case .aiUsage: return snapshot.aiUsage?.displayPercent(for: AIUsageDisplayMode.selected)
         }
     }
     static var selected: StatusMetric {
-        StatusMetric(rawValue: UserDefaults.standard.string(forKey: "statusMetric") ?? "cpu") ?? .cpu
+        let metric = StatusMetric(rawValue: UserDefaults.standard.string(forKey: "statusMetric") ?? "cpu") ?? .cpu
+        return metric == .aiUsage && !UserDefaults.standard.bool(forKey: "aiUsageEnabled") ? .cpu : metric
     }
     func displayValue(_ snapshot: StatusSnapshot) -> String {
         if self == .memory {
@@ -97,7 +109,7 @@ final class SystemMetrics {
             previousCPU = nil
             memoryBytes = nil
         }
-        guard metric != .volume else { return cached }
+        guard metric == .cpu || metric == .memory else { return cached }
         let now = ProcessInfo.processInfo.systemUptime
         if let lastSample, now - lastSample < Self.updateInterval { return cached }
         lastSample = now
@@ -107,6 +119,8 @@ final class SystemMetrics {
         case .memory:
             cached = (nil, readMemory())
         case .volume:
+            cached = (nil, nil)
+        case .aiUsage:
             cached = (nil, nil)
         }
         return cached

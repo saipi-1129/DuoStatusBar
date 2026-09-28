@@ -1,6 +1,7 @@
 import AppKit
 import AudioToolbox
 import CoreAudio
+import CoreText
 import CoreWLAN
 import IOKit.ps
 import Network
@@ -54,6 +55,7 @@ struct StatusSnapshot: Equatable {
     var lowPowerMode: Bool = false
     var memoryPressure: MemoryPressureLevel = .normal
     var chargingWatts: Double? = nil
+    var aiUsage: AIUsageSnapshot? = nil
 }
 
 final class SystemMonitor {
@@ -374,6 +376,25 @@ final class StatusBarView: NSView {
                 .foregroundColor: textColor, .paragraphStyle: style
             ])
         }
+        func centeredMetricText(_ value: String, in rect: NSRect, size: CGFloat, color: NSColor) {
+            guard let context = NSGraphicsContext.current?.cgContext else { return }
+            let attributed = NSAttributedString(string: value, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .semibold),
+                .foregroundColor: color
+            ])
+            let line = CTLineCreateWithAttributedString(attributed)
+            let bounds = CTLineGetBoundsWithOptions(line, [])
+            guard !bounds.isNull, !bounds.isEmpty else { return }
+
+            context.saveGState()
+            context.textMatrix = .identity
+            context.textPosition = CGPoint(
+                x: rect.midX - bounds.midX,
+                y: rect.midY - bounds.midY
+            )
+            CTLineDraw(line, context)
+            context.restoreGState()
+        }
         let metricColor: NSColor
         if metric == .memory {
             switch snapshot.memoryPressure {
@@ -384,8 +405,12 @@ final class StatusBarView: NSView {
         } else {
             metricColor = color
         }
-        let metricY: CGFloat = metric == .memory ? 5 : 7
-        text(metric.displayValue(snapshot), NSRect(x: 14, y: metricY, width: 41, height: 17), metric == .memory ? 12 : 13, metricColor)
+        centeredMetricText(
+            metric.displayValue(snapshot),
+            in: NSRect(x: 14, y: 6, width: 41, height: 17),
+            size: metric == .memory ? 12 : 13,
+            color: metricColor
+        )
         if showsBatteryNumber {
             text(snapshot.batteryPercent.map(String.init) ?? "—", NSRect(x: 58, y: 18, width: 17, height: 11), 9, color)
         }
@@ -436,6 +461,7 @@ final class StatusBarView: NSView {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let monitor = SystemMonitor()
+    private let aiUsageMonitor = AIUsageMonitor()
     private var statusItem: NSStatusItem!
     private var statusView: StatusBarView!
     private var refreshTimer: Timer?
@@ -457,6 +483,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusView.onInteraction = { [weak self] target in
             self?.showDashboard(for: target)
         }
+        aiUsageMonitor.onUpdate = { [weak self] _ in self?.refresh() }
+        let aiProvider = AIUsageProvider(rawValue: UserDefaults.standard.string(forKey: "aiUsageProvider") ?? "codex") ?? .codex
+        aiUsageMonitor.configure(enabled: UserDefaults.standard.bool(forKey: "aiUsageEnabled"), provider: aiProvider)
         if let button = statusItem.button {
             statusView.usesSystemRendering = true
             button.imagePosition = .imageOnly
@@ -537,7 +566,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     @objc private func refresh() {
-        let snapshot = monitor.snapshot()
+        aiUsageMonitor.refreshIfNeeded()
+        var snapshot = monitor.snapshot()
+        snapshot.aiUsage = aiUsageMonitor.snapshot
         latestSnapshot = snapshot
         statusView?.update(with: snapshot)
         dashboardController?.update(with: snapshot)
@@ -563,12 +594,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     @objc private func menuBegan() { menuTrackingDepth += 1 }
     @objc private func menuEnded() { menuTrackingDepth = max(0, menuTrackingDepth - 1) }
     @objc private func closeDashboard() {
+        dashboardController?.setSleepPreventionPanelVisible(false)
         dashboardPopover?.performClose(nil)
         glassPanel?.orderOut(nil)
         removeClickMonitors()
         syncDimmedAppearance()
     }
     func popoverDidClose(_ notification: Notification) {
+        dashboardController?.setSleepPreventionPanelVisible(false)
         guard glassPanel?.isVisible != true else { return }
         removeClickMonitors()
         syncDimmedAppearance()
@@ -605,7 +638,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func showDashboard(for target: DashboardTarget) {
-        let snapshot = monitor.snapshot()
+        var snapshot = monitor.snapshot()
+        snapshot.aiUsage = aiUsageMonitor.snapshot
 
         if dashboardShown, let dashboardController {
             dashboardController.update(with: snapshot)
@@ -629,6 +663,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         controller.onOpenSettings = { [weak self] target in
             self?.openSettings(for: target)
         }
+        controller.onAIUsageSettingsChanged = { [weak self, weak controller] enabled, provider in
+            guard let self, let controller else { return }
+            controller.updateAIUsageLayout(enabled: enabled)
+            self.updateDashboardPresentationSize(for: controller)
+            self.aiUsageMonitor.configure(enabled: enabled, provider: provider)
+            self.refresh()
+        }
+        controller.onAIUsageDisplayModeChanged = { [weak self] in
+            self?.refresh()
+        }
         controller.model.appearanceChanged = { [weak self, weak controller] in
             DispatchQueue.main.async {
                 guard let self, let controller, self.dashboardShown else { return }
@@ -644,6 +688,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func presentDashboard(_ controller: DuoDashboardViewController) {
         dashboardController = controller
+        controller.setSleepPreventionPanelVisible(true)
         if PanelAppearance.usesGlass {
             dashboardPopover?.contentViewController = nil
             let panel = GlassDashboardPanel()
@@ -655,8 +700,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             if let window = statusView.window {
                 let anchor = window.convertToScreen(statusView.convert(statusView.bounds, to: nil))
                 let screen = window.screen?.visibleFrame ?? anchor
-                let x = max(screen.minX, min(anchor.midX - 190, screen.maxX - 380))
-                panel.setFrameOrigin(NSPoint(x: x, y: anchor.minY - 492 - 8))
+                let size = controller.preferredContentSize
+                let x = max(screen.minX, min(anchor.midX - size.width / 2, screen.maxX - size.width))
+                panel.setFrameOrigin(NSPoint(x: x, y: anchor.minY - size.height - 8))
             }
             glassPanel = panel
             panel.makeKeyAndOrderFront(nil)
@@ -678,6 +724,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.show(relativeTo: statusView.bounds, of: statusView, preferredEdge: .minY)
         statusView.setDimmed(false)
         installClickMonitors()
+    }
+
+    private func updateDashboardPresentationSize(for controller: DuoDashboardViewController) {
+        let size = controller.preferredContentSize
+        if let popover = dashboardPopover,
+           popover.isShown,
+           popover.contentViewController === controller {
+            popover.contentSize = size
+        }
+        if let panel = glassPanel,
+           panel.isVisible,
+           panel.contentViewController === controller {
+            panel.setContentSize(size)
+            if let window = statusView.window {
+                let anchor = window.convertToScreen(statusView.convert(statusView.bounds, to: nil))
+                let screen = window.screen?.visibleFrame ?? anchor
+                let x = max(screen.minX, min(anchor.midX - size.width / 2, screen.maxX - size.width))
+                panel.setFrameOrigin(NSPoint(x: x, y: anchor.minY - size.height - 8))
+            }
+        }
     }
 
     private func openSettings(for target: DashboardTarget) {
@@ -712,6 +778,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
+}
+
+if CommandLine.arguments.contains("--test-ai-usage") {
+    let codexFixture = #"{"provider":"codex","usage":{"primary":{"usedPercent":71.4,"windowMinutes":10080,"resetsAt":"2026-10-02T00:00:00Z"},"secondary":null,"tertiary":null,"updatedAt":"2026-09-27T12:00:00Z"}}"#
+    let codex = try! CodexBarUsage.parse(Data(codexFixture.utf8), provider: .codex)
+    precondition(codex.windows.count == 1, "Do not invent a missing Codex limit window")
+    precondition(codex.windows[0].title == "7日")
+    precondition(codex.usedPercent == 71)
+
+    let claudeFixture = #"{"provider":"claude","rateWindowLabels":{"primary":"5時間","secondary":"7日"},"usage":{"primary":{"usedPercent":32,"windowMinutes":300,"resetsAt":"2026-09-27T13:00:00Z"},"secondary":{"usedPercent":64,"windowMinutes":10080,"resetsAt":"2026-10-03T00:00:00Z"}}}"#
+    let claude = try! CodexBarUsage.parse(Data(claudeFixture.utf8), provider: .claude)
+    precondition(claude.windows.map(\.title) == ["5時間", "7日"])
+
+    let geminiFixture = #"{"providers":[{"provider":"gemini","usage":{"primary":{"usedPercent":12,"windowMinutes":300,"resetsAt":1790514000},"secondary":{"remainingPercent":20,"windowMinutes":10080}}}]}"#
+    let gemini = try! CodexBarUsage.parse(Data(geminiFixture.utf8), provider: .gemini)
+    precondition(gemini.windows.count == 2)
+    precondition(gemini.windows[1].usedPercent == 80)
+    precondition(aiResetCountdown(until: Date(timeIntervalSince1970: 1_000_000 + 129_600), now: Date(timeIntervalSince1970: 1_000_000)) == "2日後")
+
+    var disabledFetchCount = 0
+    let disabledMonitor = AIUsageMonitor(fetchUsage: { _ in
+        disabledFetchCount += 1
+        throw AIUsageError.commandFailed
+    })
+    disabledMonitor.configure(enabled: false, provider: .codex)
+    disabledMonitor.refreshIfNeeded()
+    precondition(disabledFetchCount == 0, "The opt-out state must not invoke CodexBar")
+    let aiMetrics = SystemMetrics()
+    _ = aiMetrics.sample(for: .aiUsage)
+    precondition(aiMetrics.cpuReadCount == 0 && aiMetrics.memoryReadCount == 0)
+
+    let fixture = StatusSnapshot(
+        batteryPercent: 90,
+        isCharging: false,
+        connection: .ethernet,
+        volumePercent: 40,
+        aiUsage: codex
+    )
+    let defaults = UserDefaults.standard
+    let previousDisplayMode = defaults.object(forKey: "aiUsageDisplayMode") as? String
+    defaults.set(AIUsageDisplayMode.used.rawValue, forKey: "aiUsageDisplayMode")
+    precondition(StatusMetric.aiUsage.displayValue(fixture) == "71%")
+    defaults.set(AIUsageDisplayMode.remaining.rawValue, forKey: "aiUsageDisplayMode")
+    precondition(StatusMetric.aiUsage.displayValue(fixture) == "29%")
+    precondition(codex.windows[0].displayPercent(for: .used) == 71)
+    precondition(codex.windows[0].displayPercent(for: .remaining) == 29)
+    if let previousDisplayMode {
+        defaults.set(previousDisplayMode, forKey: "aiUsageDisplayMode")
+    } else {
+        defaults.removeObject(forKey: "aiUsageDisplayMode")
+    }
+    precondition(StatusMetric.cpu.displayValue(fixture) == "—")
+    let aiBar = StatusBarView(frame: NSRect(origin: .zero, size: StatusBarView.preferredSize))
+    aiBar.update(with: fixture)
+    precondition(aiBar.makeTemplateImage(for: .aiUsage).size == StatusBarView.preferredSize)
+    print("PASS Codex single-window, Claude 5h/7d, Gemini windows, reset countdown, and AI percent display")
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--test-metrics") {
@@ -772,6 +895,29 @@ if CommandLine.arguments.contains("--test-indicators") {
     }
     let outputs = AudioOutputs.list()
     print("outputs=\(outputs.count), currentListed=\(outputs.contains { $0.id == AudioOutputs.current() })")
+    exit(0)
+}
+if CommandLine.arguments.contains("--test-sleep-prevention") {
+    precondition(SleepPrevention.parseStatus(
+        from: "System-wide power settings:\n SleepDisabled 1\n",
+        terminationStatus: 0
+    ) == .enabled)
+    precondition(SleepPrevention.parseStatus(
+        from: "System-wide power settings:\n SleepDisabled 0\n",
+        terminationStatus: 0
+    ) == .disabled)
+    for output in [
+        "System-wide power settings:\n",
+        "System-wide power settings:\n SleepDisabled 2\n",
+        "System-wide power settings:\n SleepDisabled 0\n SleepDisabled 1\n"
+    ] {
+        precondition(SleepPrevention.parseStatus(from: output, terminationStatus: 0) == .unavailable)
+    }
+    precondition(SleepPrevention.parseStatus(
+        from: "System-wide power settings:\n SleepDisabled 1\n",
+        terminationStatus: 1
+    ) == .unavailable)
+    print("PASS strict SleepDisabled parsing; live pmset state=\(SleepPrevention.readStatus().title)")
     exit(0)
 }
 if CommandLine.arguments.contains("--test-charging") {
@@ -853,6 +999,51 @@ if CommandLine.arguments.count == 3, ["--render-live", "--render-outputs"].conta
     print("battery=\(snapshot.batteryPercent.map(String.init) ?? "unavailable"), volume=\(snapshot.volumePercent.map(String.init) ?? "unavailable"), network=\(snapshot.connection.detail)")
     exit(0)
 }
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-ai-usage" {
+    let defaults = UserDefaults.standard
+    let previousEnabled = defaults.object(forKey: "aiUsageEnabled") as? Bool
+    let previousMode = defaults.object(forKey: "aiUsageDisplayMode") as? String
+    let now = Date()
+    let usage = AIUsageSnapshot(
+        provider: .claude,
+        windows: [
+            AIUsageWindow(id: "primary", title: "5時間", usedPercent: 32, resetsAt: now.addingTimeInterval(7_200), resetDescription: nil),
+            AIUsageWindow(id: "secondary", title: "7日", usedPercent: 64, resetsAt: now.addingTimeInterval(259_200), resetDescription: nil)
+        ],
+        updatedAt: now,
+        error: nil
+    )
+    defaults.set(true, forKey: "aiUsageEnabled")
+    defaults.set(AIUsageDisplayMode.used.rawValue, forKey: "aiUsageDisplayMode")
+    try MainActor.assumeIsolated {
+        defer {
+            if let previousEnabled {
+                defaults.set(previousEnabled, forKey: "aiUsageEnabled")
+            } else {
+                defaults.removeObject(forKey: "aiUsageEnabled")
+            }
+            if let previousMode {
+                defaults.set(previousMode, forKey: "aiUsageDisplayMode")
+            } else {
+                defaults.removeObject(forKey: "aiUsageDisplayMode")
+            }
+        }
+        let fixture = StatusSnapshot(
+            batteryPercent: 88,
+            isCharging: false,
+            connection: .wifi(name: "Wi-Fi", level: 4),
+            volumePercent: 60,
+            localIPAddress: "192.0.2.42",
+            cpuPercent: 34,
+            memoryPercent: 68,
+            memoryBytes: 8_200_000_000,
+            aiUsage: usage
+        )
+        try renderDuoPreview(to: CommandLine.arguments[2], snapshot: fixture)
+    }
+    print("Rendered AI usage dashboard preview")
+    exit(0)
+}
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-bar" {
     let bar = StatusBarView(frame: NSRect(origin: .zero, size: StatusBarView.preferredSize))
     bar.appearance = NSAppearance(named: .darkAqua)
@@ -871,7 +1062,30 @@ if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-bar" 
     exit(0)
 }
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-preview" {
+    let defaults = UserDefaults.standard
+    let originalDomain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+    var previewDomain = originalDomain
+    previewDomain["panelAppearance"] = PanelAppearance.classic.rawValue
+    defaults.setVolatileDomain(previewDomain, forName: UserDefaults.argumentDomain)
+    defer { defaults.setVolatileDomain(originalDomain, forName: UserDefaults.argumentDomain) }
     try MainActor.assumeIsolated { try renderDuoPreview(to: CommandLine.arguments[2], previewMode: true) }
+    exit(0)
+}
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--render-glass-preview" {
+    guard PanelAppearance.supportsGlass else {
+        fputs("Liquid Glass preview requires macOS 26 or later.\n", stderr)
+        exit(1)
+    }
+    let defaults = UserDefaults.standard
+    let originalDomain = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+    var previewDomain = originalDomain
+    previewDomain["panelAppearance"] = PanelAppearance.liquidGlass.rawValue
+    try MainActor.assumeIsolated {
+        defaults.setVolatileDomain(previewDomain, forName: UserDefaults.argumentDomain)
+        defer { defaults.setVolatileDomain(originalDomain, forName: UserDefaults.argumentDomain) }
+        try renderDuoPreview(to: CommandLine.arguments[2])
+    }
+    print("Rendered Liquid Glass dashboard preview")
     exit(0)
 }
 let delegate = AppDelegate()
